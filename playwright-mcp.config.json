@@ -1,0 +1,21 @@
+{
+  "browser": {
+    "browserName": "chromium",
+    "launchOptions": {
+      "headless": false
+    },
+    "contextOptions": {
+      "viewport": { "width": 1280, "height": 720 }
+    }
+  },
+  "server": {
+    "port": 8931,
+    "host": "127.0.0.1"
+  },
+  "capabilities": ["core", "vision"],
+  "sharedBrowserContext": true,
+  "secrets": {
+    "LINKEDIN_EMAIL": "tu-email@ejemplo.com",
+    "LINKEDIN_PASSWORD": "tu-super-password"
+  }
+}

@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Playwright Stream Test</title>
+    <style>
+        body {
+            background: #111;
+            color: #eee;
+            font-family: system-ui, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 16px;
+            padding: 20px;
+        }
+
+        #frame {
+            border: 1px solid #444;
+            max-width: 1280px;
+            max-height: 720px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 8px;
+        }
+
+        input {
+            padding: 4px 8px;
+        }
+
+        /* Barra de pestañas */
+        .tabs-bar {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            background: #222;
+            padding: 4px 6px;
+            border-radius: 6px;
+            max-width: 1280px;
+        }
+
+        .tab {
+            background: #333;
+            border: 1px solid #444;
+            border-radius: 6px;
+            padding: 4px 8px;
+            font-size: 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            max-width: 180px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .tab.active {
+            background: #555;
+            border-color: #aaa;
+        }
+
+        .tab .label {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .tab .close {
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        #add-tab {
+            background: #222;
+            border: 1px dashed #555;
+            border-radius: 999px;
+            width: 24px;
+            height: 24px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            color: #aaa;
+        }
+
+        #add-tab:hover {
+            background: #333;
+            color: #fff;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Stream Playwright (Chromium) via WebSocket</h1>
+
+    <div id="tabs-bar" class="tabs-bar">
+        <!-- Aquí se inyectan las pestañas -->
+        <button id="add-tab" title="Nueva pestaña">+</button>
+    </div>
+
+    <img id="frame" />
+
+    <div class="controls">
+        <input id="url" placeholder="https://www.linkedin.com" size="40" />
+        <button id="goto">Goto</button>
+    </div>
+
+    <script>
+        const ws = new WebSocket("ws://localhost:4000/ws");
+        const img = document.getElementById("frame");
+        const urlInput = document.getElementById("url");
+        const gotoBtn = document.getElementById("goto");
+        const tabsBar = document.getElementById("tabs-bar");
+        const addTabBtn = document.getElementById("add-tab");
+
+        let remoteHasFocus = false;
+        let lastObjectUrl = null;
+
+        /** Estado de pestañas en cliente */
+        let tabsState = {
+            activeIndex: 0,
+            tabs: [],
+        };
+
+        // Queremos que los binarios vengan como ArrayBuffer
+        ws.binaryType = "arraybuffer";
+
+        ws.onopen = () => {
+            console.log("WS connected");
+        };
+
+        ws.onmessage = (event) => {
+            // 1) Si es string → JSON (session_started / error / tabs_state)
+            if (typeof event.data === "string") {
+                const msg = JSON.parse(event.data);
+
+                if (msg.type === "session_started") {
+                    console.log("Sesión iniciada:", msg);
+                }
+
+                if (msg.type === "error") {
+                    console.error("Error desde servidor:", msg.message);
+                }
+
+                if (msg.type === "tabs_state") {
+                    tabsState = msg;
+                    renderTabs();
+                }
+
+                return;
+            }
+
+            // 2) Si es binario → frame JPEG
+            if (event.data instanceof ArrayBuffer) {
+                const blob = new Blob([event.data], { type: "image/jpeg" });
+                const url = URL.createObjectURL(blob);
+
+                img.src = url;
+
+                // Liberar el URL anterior para no fugar memoria
+                if (lastObjectUrl) {
+                    URL.revokeObjectURL(lastObjectUrl);
+                }
+                lastObjectUrl = url;
+            }
+        };
+
+        ws.onclose = () => {
+            console.log("WS closed");
+        };
+
+        gotoBtn.onclick = () => {
+            const url = urlInput.value || "https://www.linkedin.com";
+            ws.send(JSON.stringify({ type: "goto", url }));
+        };
+
+        urlInput.addEventListener("keydown", (ev) => {
+            if (ev.key === "Enter") {
+                gotoBtn.click();
+            }
+        });
+
+        // 🔹 Que la imagen no sea arrastrable (para que no moleste)
+        img.draggable = false;
+
+        // 🔹 CLICK: enviamos coordenadas normalizadas [0..1]
+        img.addEventListener("click", (ev) => {
+            if (ws.readyState !== WebSocket.OPEN) return;
+
+            const rect = img.getBoundingClientRect();
+            const x = (ev.clientX - rect.left) / rect.width;
+            const y = (ev.clientY - rect.top) / rect.height;
+
+            const nx = Math.min(Math.max(x, 0), 1);
+            const ny = Math.min(Math.max(y, 0), 1);
+
+            ws.send(
+                JSON.stringify({
+                    type: "click",
+                    x: nx,
+                    y: ny,
+                })
+            );
+
+            remoteHasFocus = true;
+            img.style.outline = "2px solid #0f0";
+        });
+
+        // 🔹 TECLADO: mandamos keydown / keyup hacia Playwright
+        document.addEventListener("keydown", (ev) => {
+            if (!remoteHasFocus) return;
+            if (ws.readyState !== WebSocket.OPEN) return;
+
+            if (
+                [
+                    "Tab",
+                    "Backspace",
+                    "ArrowUp",
+                    "ArrowDown",
+                    "ArrowLeft",
+                    "ArrowRight",
+                    "Enter",
+                ].includes(ev.key)
+            ) {
+                ev.preventDefault();
+            }
+
+            if (ev.repeat) return;
+
+            ws.send(
+                JSON.stringify({
+                    type: "keydown",
+                    key: ev.key,
+                })
+            );
+        });
+
+        document.addEventListener("keyup", (ev) => {
+            if (!remoteHasFocus) return;
+            if (ws.readyState !== WebSocket.OPEN) return;
+
+            ws.send(
+                JSON.stringify({
+                    type: "keyup",
+                    key: ev.key,
+                })
+            );
+        });
+
+        // 🔹 SCROLL: rueda del ratón → scroll remoto
+        img.addEventListener(
+            "wheel",
+            (ev) => {
+                if (!remoteHasFocus) return;
+                if (ws.readyState !== WebSocket.OPEN) return;
+
+                ev.preventDefault();
+
+                ws.send(
+                    JSON.stringify({
+                        type: "scroll",
+                        deltaX: ev.deltaX,
+                        deltaY: ev.deltaY,
+                    })
+                );
+            },
+            { passive: false }
+        );
+
+        // 🔹 Render de tabs
+        function renderTabs() {
+            // Eliminar botones de tabs antiguos (dejamos el +)
+            const oldTabs = tabsBar.querySelectorAll(".tab");
+            oldTabs.forEach((el) => el.remove());
+
+            tabsState.tabs.forEach((tab) => {
+                const btn = document.createElement("button");
+                btn.className = "tab";
+                if (tab.index === tabsState.activeIndex) {
+                    btn.classList.add("active");
+                }
+
+                const label = document.createElement("span");
+                label.className = "label";
+                label.textContent = tab.title || tab.url || "Nueva pestaña";
+
+                const close = document.createElement("span");
+                close.className = "close";
+                close.textContent = "×";
+
+                close.onclick = (ev) => {
+                    ev.stopPropagation();
+                    if (ws.readyState !== WebSocket.OPEN) return;
+                    ws.send(
+                        JSON.stringify({
+                            type: "close_tab",
+                            index: tab.index,
+                        })
+                    );
+                };
+
+                btn.onclick = () => {
+                    if (ws.readyState !== WebSocket.OPEN) return;
+                    ws.send(
+                        JSON.stringify({
+                            type: "switch_tab",
+                            index: tab.index,
+                        })
+                    );
+                };
+
+                btn.appendChild(label);
+                btn.appendChild(close);
+
+                tabsBar.insertBefore(btn, addTabBtn);
+            });
+        }
+
+        // 🔹 Botón "nueva pestaña"
+        addTabBtn.onclick = () => {
+            if (ws.readyState !== WebSocket.OPEN) return;
+
+            const rawUrl = urlInput.value.trim();
+            const payload =
+                rawUrl.length > 0
+                    ? { type: "new_tab", url: rawUrl }
+                    : { type: "new_tab" };
+
+            ws.send(JSON.stringify(payload));
+        };
+    </script>
+</body>
+
+</html>
