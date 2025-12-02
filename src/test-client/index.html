@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="UTF-8" />
-    <title>Playwright Stream Test</title>
+    <title>Playwright Autonomous LinkedIn Agent</title>
     <style>
         body {
             background: #111;
@@ -25,13 +25,37 @@
         .controls {
             display: flex;
             gap: 8px;
+            flex-wrap: wrap;
         }
 
-        input {
+        input,
+        textarea {
             padding: 4px 8px;
+            font-family: inherit;
         }
 
-        /* Barra de pestañas */
+        button {
+            padding: 4px 10px;
+            cursor: pointer;
+            background: #333;
+            color: #eee;
+            border: 1px solid #555;
+            border-radius: 4px;
+        }
+
+        button:hover {
+            background: #444;
+        }
+
+        button.autonomous {
+            background: #2563eb;
+            border-color: #3b82f6;
+        }
+
+        button.autonomous:hover {
+            background: #1d4ed8;
+        }
+
         .tabs-bar {
             display: flex;
             align-items: center;
@@ -91,14 +115,74 @@
             background: #333;
             color: #fff;
         }
+
+        .section {
+            max-width: 1280px;
+            width: 100%;
+            border: 1px solid #333;
+            padding: 12px;
+            border-radius: 8px;
+            background: #181818;
+        }
+
+        .section h2 {
+            margin-top: 0;
+            margin-bottom: 8px;
+            font-size: 16px;
+        }
+
+        .section.autonomous {
+            border-color: #3b82f6;
+            background: #1a2332;
+        }
+
+        .field-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 8px;
+            align-items: center;
+        }
+
+        .field-row label {
+            font-size: 13px;
+            opacity: 0.8;
+        }
+
+        #api-log {
+            max-width: 1280px;
+            width: 100%;
+            max-height: 260px;
+            overflow: auto;
+            background: #050505;
+            border-radius: 8px;
+            padding: 8px;
+            border: 1px solid #333;
+            font-size: 12px;
+            white-space: pre-wrap;
+        }
+
+        #session-label {
+            font-size: 12px;
+            opacity: 0.75;
+        }
+
+        .badge {
+            background: #2563eb;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: bold;
+        }
     </style>
 </head>
 
 <body>
-    <h1>Stream Playwright (Chromium) via WebSocket</h1>
+    <h1>🤖 Playwright Autonomous LinkedIn Agent</h1>
+    <div id="session-label">SessionId: <code id="session-id">-</code></div>
 
     <div id="tabs-bar" class="tabs-bar">
-        <!-- Aquí se inyectan las pestañas -->
         <button id="add-tab" title="Nueva pestaña">+</button>
     </div>
 
@@ -109,156 +193,144 @@
         <button id="goto">Goto</button>
     </div>
 
+    <!-- 🤖 AUTONOMOUS AGENT SECTION -->
+    <div class="section autonomous">
+        <h2>🤖 Autonomous Agent <span class="badge">AI-Powered</span></h2>
+
+        <div class="field-row">
+            <label for="agent-email">Email LinkedIn:</label>
+            <input id="agent-email" type="email" placeholder="tu-email@ejemplo.com" size="30" />
+            <label for="agent-password">Password:</label>
+            <input id="agent-password" type="password" placeholder="********" size="20" />
+            <button id="btn-agent-login" class="autonomous">🤖 Login Autónomo</button>
+        </div>
+
+        <hr style="border-color:#334155; width:100%;">
+
+        <div class="field-row">
+            <label for="agent-profile-url">URL perfil LinkedIn:</label>
+            <input id="agent-profile-url" type="text" placeholder="https://www.linkedin.com/in/..." size="50" />
+        </div>
+
+        <div class="field-row">
+            <label for="agent-message">Mensaje personalizado:</label>
+            <textarea id="agent-message" rows="2" cols="60" placeholder="Mensaje para conexión o chat..."></textarea>
+        </div>
+
+        <div class="field-row">
+            <button id="btn-agent-connect" class="autonomous">🤖 Enviar Conexión (Auto)</button>
+            <button id="btn-agent-message" class="autonomous">🤖 Enviar Mensaje (Auto)</button>
+        </div>
+    </div>
+
+    <!-- Manual controls (legacy) -->
+    <div class="section">
+        <h2>Manual LinkedIn Controls (Legacy)</h2>
+        <div class="field-row">
+            <label for="liat-input">li_at:</label>
+            <input id="liat-input" type="text" placeholder="Cookie li_at" size="60" />
+            <button id="btn-login-liat">Login con li_at</button>
+        </div>
+        <div class="field-row">
+            <label for="profile-url">URL perfil:</label>
+            <input id="profile-url" type="text" placeholder="https://www.linkedin.com/in/..." size="60" />
+            <button id="btn-check-connection">Check connection</button>
+        </div>
+    </div>
+
+    <div>
+        <h2 style="font-size:16px;">📋 Log de API / Agent Activity</h2>
+        <pre id="api-log">{}</pre>
+    </div>
+
     <script>
-        const ws = new WebSocket("ws://localhost:4000/ws");
+        const WS_URL = "ws://localhost:4000/ws";
+        const API_BASE = "http://localhost:4000/api/v1";
+
+        const ws = new WebSocket(WS_URL);
         const img = document.getElementById("frame");
         const urlInput = document.getElementById("url");
         const gotoBtn = document.getElementById("goto");
         const tabsBar = document.getElementById("tabs-bar");
         const addTabBtn = document.getElementById("add-tab");
+        const sessionIdSpan = document.getElementById("session-id");
+        const apiLog = document.getElementById("api-log");
+
+        // Agent controls
+        const agentEmail = document.getElementById("agent-email");
+        const agentPassword = document.getElementById("agent-password");
+        const btnAgentLogin = document.getElementById("btn-agent-login");
+        const agentProfileUrl = document.getElementById("agent-profile-url");
+        const agentMessage = document.getElementById("agent-message");
+        const btnAgentConnect = document.getElementById("btn-agent-connect");
+        const btnAgentMessage = document.getElementById("btn-agent-message");
+
+        // Legacy controls
+        const liatInput = document.getElementById("liat-input");
+        const btnLoginLiat = document.getElementById("btn-login-liat");
+        const profileUrlInput = document.getElementById("profile-url");
+        const btnCheckConnection = document.getElementById("btn-check-connection");
 
         let remoteHasFocus = false;
         let lastObjectUrl = null;
+        let currentSessionId = null;
+        let tabsState = { activeIndex: 0, tabs: [] };
 
-        /** Estado de pestañas en cliente */
-        let tabsState = {
-            activeIndex: 0,
-            tabs: [],
-        };
-
-        // Queremos que los binarios vengan como ArrayBuffer
         ws.binaryType = "arraybuffer";
 
-        ws.onopen = () => {
-            console.log("WS connected");
-        };
+        ws.onopen = () => console.log("WS connected");
 
         ws.onmessage = (event) => {
-            // 1) Si es string → JSON (session_started / error / tabs_state)
             if (typeof event.data === "string") {
                 const msg = JSON.parse(event.data);
-
                 if (msg.type === "session_started") {
-                    console.log("Sesión iniciada:", msg);
+                    currentSessionId = msg.sessionId;
+                    sessionIdSpan.textContent = currentSessionId;
                 }
-
                 if (msg.type === "error") {
-                    console.error("Error desde servidor:", msg.message);
+                    console.error("WS error:", msg.message);
+                    appendApiLog("WS error", msg);
                 }
-
                 if (msg.type === "tabs_state") {
                     tabsState = msg;
                     renderTabs();
                 }
-
                 return;
             }
 
-            // 2) Si es binario → frame JPEG
             if (event.data instanceof ArrayBuffer) {
                 const blob = new Blob([event.data], { type: "image/jpeg" });
                 const url = URL.createObjectURL(blob);
-
                 img.src = url;
-
-                // Liberar el URL anterior para no fugar memoria
-                if (lastObjectUrl) {
-                    URL.revokeObjectURL(lastObjectUrl);
-                }
+                if (lastObjectUrl) URL.revokeObjectURL(lastObjectUrl);
                 lastObjectUrl = url;
             }
         };
 
-        ws.onclose = () => {
-            console.log("WS closed");
-        };
+        ws.onclose = () => console.log("WS closed");
 
         gotoBtn.onclick = () => {
             const url = urlInput.value || "https://www.linkedin.com";
             ws.send(JSON.stringify({ type: "goto", url }));
         };
 
-        urlInput.addEventListener("keydown", (ev) => {
-            if (ev.key === "Enter") {
-                gotoBtn.click();
-            }
-        });
-
-        // 🔹 Que la imagen no sea arrastrable (para que no moleste)
         img.draggable = false;
 
-        // 🔹 CLICK: enviamos coordenadas normalizadas [0..1]
         img.addEventListener("click", (ev) => {
             if (ws.readyState !== WebSocket.OPEN) return;
-
             const rect = img.getBoundingClientRect();
-            const x = (ev.clientX - rect.left) / rect.width;
-            const y = (ev.clientY - rect.top) / rect.height;
-
-            const nx = Math.min(Math.max(x, 0), 1);
-            const ny = Math.min(Math.max(y, 0), 1);
-
-            ws.send(
-                JSON.stringify({
-                    type: "click",
-                    x: nx,
-                    y: ny,
-                })
-            );
-
+            const x = Math.min(Math.max((ev.clientX - rect.left) / rect.width, 0), 1);
+            const y = Math.min(Math.max((ev.clientY - rect.top) / rect.height, 0), 1);
+            ws.send(JSON.stringify({ type: "click", x, y }));
             remoteHasFocus = true;
             img.style.outline = "2px solid #0f0";
         });
 
-        // 🔹 TECLADO: mandamos keydown / keyup hacia Playwright
-        document.addEventListener("keydown", (ev) => {
-            if (!remoteHasFocus) return;
-            if (ws.readyState !== WebSocket.OPEN) return;
-
-            if (
-                [
-                    "Tab",
-                    "Backspace",
-                    "ArrowUp",
-                    "ArrowDown",
-                    "ArrowLeft",
-                    "ArrowRight",
-                    "Enter",
-                ].includes(ev.key)
-            ) {
-                ev.preventDefault();
-            }
-
-            if (ev.repeat) return;
-
-            ws.send(
-                JSON.stringify({
-                    type: "keydown",
-                    key: ev.key,
-                })
-            );
-        });
-
-        document.addEventListener("keyup", (ev) => {
-            if (!remoteHasFocus) return;
-            if (ws.readyState !== WebSocket.OPEN) return;
-
-            ws.send(
-                JSON.stringify({
-                    type: "keyup",
-                    key: ev.key,
-                })
-            );
-        });
-
-        // 🔹 SCROLL: rueda del ratón → scroll remoto
         img.addEventListener(
             "wheel",
             (ev) => {
-                if (!remoteHasFocus) return;
-                if (ws.readyState !== WebSocket.OPEN) return;
-
-                ev.preventDefault();
+                if (!remoteHasFocus || ws.readyState !== WebSocket.OPEN) return;
+                ev.preventDefault(); // para que no scrollee tu página local
 
                 ws.send(
                     JSON.stringify({
@@ -271,18 +343,14 @@
             { passive: false }
         );
 
-        // 🔹 Render de tabs
         function renderTabs() {
-            // Eliminar botones de tabs antiguos (dejamos el +)
             const oldTabs = tabsBar.querySelectorAll(".tab");
             oldTabs.forEach((el) => el.remove());
 
             tabsState.tabs.forEach((tab) => {
                 const btn = document.createElement("button");
                 btn.className = "tab";
-                if (tab.index === tabsState.activeIndex) {
-                    btn.classList.add("active");
-                }
+                if (tab.index === tabsState.activeIndex) btn.classList.add("active");
 
                 const label = document.createElement("span");
                 label.className = "label";
@@ -291,47 +359,277 @@
                 const close = document.createElement("span");
                 close.className = "close";
                 close.textContent = "×";
-
                 close.onclick = (ev) => {
                     ev.stopPropagation();
-                    if (ws.readyState !== WebSocket.OPEN) return;
-                    ws.send(
-                        JSON.stringify({
-                            type: "close_tab",
-                            index: tab.index,
-                        })
-                    );
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: "close_tab", index: tab.index }));
+                    }
                 };
 
                 btn.onclick = () => {
-                    if (ws.readyState !== WebSocket.OPEN) return;
-                    ws.send(
-                        JSON.stringify({
-                            type: "switch_tab",
-                            index: tab.index,
-                        })
-                    );
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: "switch_tab", index: tab.index }));
+                    }
                 };
 
                 btn.appendChild(label);
                 btn.appendChild(close);
-
                 tabsBar.insertBefore(btn, addTabBtn);
             });
         }
 
-        // 🔹 Botón "nueva pestaña"
         addTabBtn.onclick = () => {
             if (ws.readyState !== WebSocket.OPEN) return;
-
             const rawUrl = urlInput.value.trim();
-            const payload =
-                rawUrl.length > 0
-                    ? { type: "new_tab", url: rawUrl }
-                    : { type: "new_tab" };
-
+            const payload = rawUrl.length > 0
+                ? { type: "new_tab", url: rawUrl }
+                : { type: "new_tab" };
             ws.send(JSON.stringify(payload));
         };
+
+        function assertSession() {
+            if (!currentSessionId) {
+                throw new Error("No session ID yet");
+            }
+            return currentSessionId;
+        }
+
+        function appendApiLog(label, data) {
+            const time = new Date().toLocaleTimeString();
+            const block = `\n[${time}] ${label}:\n${JSON.stringify(data, null, 2)}\n---`;
+            apiLog.textContent = apiLog.textContent + block;
+            apiLog.scrollTop = apiLog.scrollHeight;
+        }
+
+        async function callApi(path, options) {
+            const url = API_BASE + path;
+            const res = await fetch(url, {
+                headers: { "Content-Type": "application/json" },
+                ...options,
+            });
+            const json = await res.json().catch(() => ({}));
+            return { status: res.status, ok: res.ok, body: json };
+        }
+
+        // 🤖 AUTONOMOUS AGENT HANDLERS
+        btnAgentLogin.onclick = async () => {
+            try {
+                const sessionId = assertSession();
+                const email = agentEmail.value.trim();
+                const password = agentPassword.value.trim();
+
+                if (!email || !password) {
+                    alert("Email y password son requeridos");
+                    return;
+                }
+
+                appendApiLog("🤖 Agent Login", { status: "starting..." });
+
+                const result = await callApi("/agent/linkedin/login", {
+                    method: "POST",
+                    body: JSON.stringify({ sessionId, email, password }),
+                });
+
+                appendApiLog("🤖 Agent Login Result", result);
+            } catch (err) {
+                appendApiLog("🤖 Agent Login ERROR", { error: String(err) });
+            }
+        };
+
+        btnAgentConnect.onclick = async () => {
+            try {
+                const sessionId = assertSession();
+                const profileUrl = agentProfileUrl.value.trim();
+                const message = agentMessage.value.trim();
+
+                if (!profileUrl) {
+                    alert("URL de perfil es requerida");
+                    return;
+                }
+
+                appendApiLog("🤖 Agent Connect", { status: "starting..." });
+
+                const result = await callApi("/agent/linkedin/connect", {
+                    method: "POST",
+                    body: JSON.stringify({ sessionId, profileUrl, message }),
+                });
+
+                appendApiLog("🤖 Agent Connect Result", result);
+            } catch (err) {
+                appendApiLog("🤖 Agent Connect ERROR", { error: String(err) });
+            }
+        };
+
+        btnAgentMessage.onclick = async () => {
+            try {
+                const sessionId = assertSession();
+                const profileUrl = agentProfileUrl.value.trim();
+                const message = agentMessage.value.trim();
+
+                if (!profileUrl || !message) {
+                    alert("URL de perfil y mensaje son requeridos");
+                    return;
+                }
+
+                appendApiLog("🤖 Agent Message", { status: "starting..." });
+
+                const result = await callApi("/agent/linkedin/message", {
+                    method: "POST",
+                    body: JSON.stringify({ sessionId, profileUrl, message }),
+                });
+
+                appendApiLog("🤖 Agent Message Result", result);
+            } catch (err) {
+                appendApiLog("🤖 Agent Message ERROR", { error: String(err) });
+            }
+        };
+
+        // Legacy handlers
+        btnLoginLiat.onclick = async () => {
+            try {
+                const sessionId = assertSession();
+                const li_at = liatInput.value.trim();
+                if (!li_at) {
+                    alert("Cookie li_at requerida");
+                    return;
+                }
+                const result = await callApi(
+                    `/linkedin/session/${encodeURIComponent(sessionId)}/login-cookie`,
+                    { method: "POST", body: JSON.stringify({ li_at }) }
+                );
+                appendApiLog("login-cookie", result);
+            } catch (err) {
+                appendApiLog("login-cookie ERROR", { error: String(err) });
+            }
+        };
+
+        btnCheckConnection.onclick = async () => {
+            try {
+                const sessionId = assertSession();
+                const profileUrl = profileUrlInput.value.trim();
+                if (!profileUrl) {
+                    alert("URL de perfil requerida");
+                    return;
+                }
+                const result = await callApi(
+                    `/linkedin/session/${encodeURIComponent(sessionId)}/profile/check-connection`,
+                    { method: "POST", body: JSON.stringify({ profileUrl }) }
+                );
+                appendApiLog("check-connection", result);
+            } catch (err) {
+                appendApiLog("check-connection ERROR", { error: String(err) });
+            }
+        };
+
+        function isPrintableKey(ev) {
+            // Caracter visible (1 char) sin Ctrl/Meta
+            return ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey;
+        }
+
+        function isTextInput(el) {
+            if (!el) return false;
+            const tag = el.tagName;
+            if (tag === "INPUT" || tag === "TEXTAREA") return true;
+            if (el.isContentEditable) return true;
+            return false;
+        }
+
+        // Cuando enfoco un input/textarea local, salgo del modo remoto
+        document.querySelectorAll("input, textarea").forEach((el) => {
+            el.addEventListener("focus", () => {
+                remoteHasFocus = false;
+                img.style.outline = "none";
+            });
+
+            el.addEventListener("mousedown", () => {
+                remoteHasFocus = false;
+                img.style.outline = "none";
+            });
+        });
+
+        // Permitir salir del "modo remoto" con Escape
+        window.addEventListener("keydown", (ev) => {
+            if (ev.key === "Escape" && remoteHasFocus) {
+                remoteHasFocus = false;
+                img.style.outline = "none";
+            }
+        });
+
+        // KEYDOWN: escribir o mandar teclas especiales
+        window.addEventListener("keydown", (ev) => {
+            // si el foco está en un input/textarea local, no interceptamos
+            if (isTextInput(ev.target)) {
+                return;
+            }
+
+            if (!remoteHasFocus || ws.readyState !== WebSocket.OPEN) return;
+
+            // Evitamos que la página local consuma el evento
+            if (!ev.metaKey && !ev.ctrlKey) {
+                ev.preventDefault();
+            }
+
+            if (isPrintableKey(ev)) {
+                // 👉 Texto normal (incluye "@", "#", etc.)
+                ws.send(
+                    JSON.stringify({
+                        type: "type",
+                        text: ev.key,
+                    })
+                );
+            } else {
+                // 👉 Teclas especiales: Enter, Backspace, Tab, flechas, etc.
+                ws.send(
+                    JSON.stringify({
+                        type: "keydown",
+                        key: ev.key,
+                    })
+                );
+            }
+        });
+
+        // KEYUP: solo para teclas especiales
+        window.addEventListener("keyup", (ev) => {
+            // si el foco está en un input/textarea local, no interceptamos
+            if (isTextInput(ev.target)) {
+                return;
+            }
+
+            if (!remoteHasFocus || ws.readyState !== WebSocket.OPEN) return;
+
+            if (isPrintableKey(ev)) {
+                // para texto ya usamos "type" en keydown, nada que hacer aquí
+                return;
+            }
+
+            ws.send(
+                JSON.stringify({
+                    type: "keyup",
+                    key: ev.key,
+                })
+            );
+        });
+
+        window.addEventListener("paste", (ev) => {
+            // si se pega dentro de un input/textarea local, dejar comportamiento normal
+            if (isTextInput(ev.target)) {
+                return;
+            }
+
+            if (!remoteHasFocus || ws.readyState !== WebSocket.OPEN) return;
+
+            const text = ev.clipboardData?.getData("text");
+            if (!text) return;
+
+            ev.preventDefault();
+
+            ws.send(
+                JSON.stringify({
+                    type: "type",
+                    text, // se pegará como si lo escribieras rápido
+                })
+            );
+        });
     </script>
 </body>
 
