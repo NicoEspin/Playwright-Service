@@ -55,6 +55,95 @@ function createLinkedInTools(
 
   const getPage = () => requirePage(sessionId);
 
+  // Snapshot de accesibilidad (similar a browser_snapshot del MCP oficial de Playwright)
+  // Snapshot ligero de la página (sin usar page.accessibility)
+  tools.dom_snapshot = tool({
+    description:
+      "Devuelve un snapshot ligero de la página actual (HTML y texto plano). Úsalo para entender la estructura de la UI antes de interactuar.",
+    inputSchema: z.object({
+      interestingOnly: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Campo solo para compatibilidad; actualmente no cambia el comportamiento."
+        ),
+    }),
+    execute: async ({ interestingOnly }) => {
+      const page = getPage();
+
+      const [html, text] = await Promise.all([
+        page.content(),
+        page.evaluate(() => document.body?.innerText || ""),
+      ]);
+
+      return {
+        url: page.url(),
+        snapshot: {
+          html,
+          text,
+        },
+      };
+    },
+  });
+
+  // Ejecución genérica de código Playwright: máxima flexibilidad
+  tools.playwright_run_code = tool({
+    description:
+      "Ejecuta un snippet de código Playwright asíncrono sobre la pestaña actual. El snippet debe usar la variable 'page'. Devuelve lo que retorne tu código.",
+    inputSchema: z.object({
+      code: z
+        .string()
+        .describe(
+          "Código JS/TS asíncrono. Ejemplo: `await page.getByRole('button', { name: /mensaje|message/i }).click();`"
+        ),
+    }),
+    execute: async ({ code }) => {
+      const page = getPage();
+
+      // Constructor de funciones async dinámicas
+      const AsyncFunction = Object.getPrototypeOf(async function () {})
+        .constructor as any;
+
+      const fn = new AsyncFunction(
+        "page",
+        `
+        try {
+          ${code}
+        } catch (err) {
+          return { __error: String(err) };
+        }
+      `
+      );
+
+      const result = await fn(page);
+      return result ?? null;
+    },
+  });
+
+  // Tool para que el modelo marque explícitamente el resultado final de la tarea
+  tools.report_task_result = tool({
+    description:
+      "Úsalo UNA sola vez al final para declarar el resultado de la tarea (login / conexión / mensaje) de forma estructurada.",
+    inputSchema: z.object({
+      status: z.enum([
+        "login_ok",
+        "invite_sent",
+        "already_connected",
+        "message_sent",
+        "not_connected",
+        "not_logged_in",
+        "human_required",
+        "failed",
+      ]),
+      reason: z
+        .string()
+        .describe("Resumen breve en español de lo que ocurrió."),
+    }),
+    execute: async ({ status, reason }) => {
+      return { status, reason };
+    },
+  });
+
   // Navegar a una URL
   tools.navigate = tool({
     description:
@@ -99,34 +188,132 @@ function createLinkedInTools(
   });
 
   // Click por role + texto visible (button/link)
+  // Click flexible: role+name, texto, selector CSS o aria-label
   tools.click = tool({
     description:
-      "Hace click en un elemento usando role ARIA (button o link) y el texto visible. Usa nombres parciales (regex, case-insensitive).",
-    inputSchema: z.object({
-      role: z
-        .enum(["button", "link"])
-        .describe('Role del elemento. Normalmente "button" o "link".'),
-      name: z
-        .string()
-        .describe(
-          "Texto visible del elemento, por ejemplo 'Iniciar sesión', 'Connect', 'Mensaje'. Se hace match case-insensitive."
-        ),
-    }),
-    execute: async ({ role, name }) => {
+      "Hace click en un elemento usando diferentes estrategias: role+name (ARIA), texto visible, selector CSS o aria-label. Usa index para elegir entre varias coincidencias.",
+    inputSchema: z
+      .object({
+        strategy: z
+          .enum(["role", "text", "selector", "ariaLabel"])
+          .default("role")
+          .describe(
+            "Estrategia para localizar el elemento: 'role', 'text', 'selector' o 'ariaLabel'."
+          ),
+
+        // role
+        role: z
+          .enum(["button", "link"])
+          .optional()
+          .describe("Role del elemento cuando strategy='role'."),
+        name: z
+          .string()
+          .optional()
+          .describe(
+            "Texto visible (regex case-insensitive) cuando strategy='role'."
+          ),
+
+        // text
+        text: z
+          .string()
+          .optional()
+          .describe(
+            "Texto visible (regex case-insensitive) cuando strategy='text'."
+          ),
+
+        // selector CSS puro
+        selector: z
+          .string()
+          .optional()
+          .describe(
+            "Selector CSS cuando strategy='selector', por ejemplo '.msg-form__send-button' o 'button[aria-label*=\"Mensaje\"]'."
+          ),
+
+        // aria-label
+        ariaLabel: z
+          .string()
+          .optional()
+          .describe(
+            "Texto parcial a buscar en aria-label cuando strategy='ariaLabel'."
+          ),
+
+        // cuál coincidencia usar
+        index: z
+          .number()
+          .int()
+          .min(0)
+          .default(0)
+          .describe(
+            "Índice (0-based) de la coincidencia a clickear si hay varias."
+          ),
+      })
+      .refine(
+        (data) => {
+          switch (data.strategy) {
+            case "role":
+              return !!data.role && !!data.name;
+            case "text":
+              return !!data.text;
+            case "selector":
+              return !!data.selector;
+            case "ariaLabel":
+              return !!data.ariaLabel;
+            default:
+              return false;
+          }
+        },
+        {
+          message:
+            "Debes proporcionar los campos correctos para la estrategia elegida (role+name, text, selector o ariaLabel).",
+        }
+      ),
+    execute: async ({
+      strategy,
+      role,
+      name,
+      text,
+      selector,
+      ariaLabel,
+      index,
+    }) => {
       const page = getPage();
-      const locator = page.getByRole(role as any, {
-        name: new RegExp(name, "i"),
-      });
+      let locator;
+
+      if (strategy === "role") {
+        locator = page.getByRole(role as any, {
+          name: new RegExp(name!, "i"),
+        });
+      } else if (strategy === "text") {
+        locator = page.getByText(new RegExp(text!, "i"));
+      } else if (strategy === "selector") {
+        locator = page.locator(selector!);
+      } else if (strategy === "ariaLabel") {
+        // aria-label parcial, case-insensitive
+        locator = page.locator(`[aria-label*="${ariaLabel!}"]`);
+      } else {
+        throw new Error(`Estrategia de click desconocida: ${strategy}`);
+      }
+
       const count = await locator.count();
+
       if (count === 0) {
         throw new Error(
-          `No encontré ningún elemento con role=${role} y texto ~/${name}/i`
+          `click: no encontré elementos usando strategy=${strategy}.`
         );
       }
-      await locator.first().click();
+
+      const safeIndex = Math.min(index!, count - 1);
+      await locator.nth(safeIndex).click();
+
       return {
-        clickedRole: role,
-        clickedName: name,
+        strategy,
+        role: role ?? null,
+        name: name ?? null,
+        text: text ?? null,
+        selector: selector ?? null,
+        ariaLabel: ariaLabel ?? null,
+        matchesFound: count,
+        clickedIndex: safeIndex,
       };
     },
   });
@@ -213,6 +400,62 @@ function createLinkedInTools(
     },
   });
 
+  // Tool de alto nivel: enviar mensaje usando la lógica robusta de linkedin.service
+  tools.send_message = tool({
+    description:
+      "Envía un mensaje a un perfil de LinkedIn que ya es conexión, usando Playwright con selectores robustos. Úsalo como PRIMER intento para enviar mensajes.",
+    inputSchema: z.object({
+      profileUrl: z
+        .string()
+        .describe(
+          "URL completa del perfil de LinkedIn al que quieres escribir."
+        ),
+      message: z.string().describe("Texto del mensaje que quieres enviar."),
+    }),
+    execute: async ({ profileUrl, message }) => {
+      const page = getPage();
+      const result = await sendMessageToProfile(page, profileUrl, message);
+
+      return {
+        status: result.status,
+        error: result.error ?? null,
+        isConnection: result.analysis.isConnection,
+        isLoggedIn: result.analysis.isLoggedIn,
+        isHumanRequired: result.analysis.isHumanRequired,
+        blockType: result.analysis.blockType,
+      };
+    },
+  });
+
+  // Tool de alto nivel: enviar invitación de conexión
+  tools.send_connection_request = tool({
+    description:
+      "Envía una solicitud de conexión a un perfil de LinkedIn (con o sin nota) usando lógica robusta.",
+    inputSchema: z.object({
+      profileUrl: z
+        .string()
+        .describe(
+          "URL completa del perfil de LinkedIn al que quieres conectar."
+        ),
+      note: z
+        .string()
+        .optional()
+        .describe("Nota opcional para acompañar la invitación."),
+    }),
+    execute: async ({ profileUrl, note }) => {
+      const page = getPage();
+      const result = await sendConnectionRequest(page, profileUrl, note);
+
+      return {
+        status: result.status,
+        error: result.error ?? null,
+        isConnection: result.analysis.isConnection,
+        isLoggedIn: result.analysis.isLoggedIn,
+        isHumanRequired: result.analysis.isHumanRequired,
+        blockType: result.analysis.blockType,
+      };
+    },
+  });
   // Listado de inputs / textareas / textboxes
   tools.list_textboxes = tool({
     description:
@@ -382,61 +625,6 @@ function createLinkedInTools(
     },
   });
 
-  // Tool de alto nivel: enviar request de conexión
-  tools.send_connection_request = tool({
-    description:
-      "Envía una solicitud de conexión a un perfil de LinkedIn. Usa un mensaje opcional como nota.",
-    inputSchema: z.object({
-      profileUrl: z.string(),
-      note: z
-        .string()
-        .optional()
-        .describe("Nota opcional para la solicitud de conexión."),
-    }),
-    execute: async ({ profileUrl, note }) => {
-      const page = getPage();
-      const result = await sendConnectionRequest(page, profileUrl, note);
-
-      const { analysis, status, error } = result;
-
-      return {
-        status,
-        error,
-        isLoggedIn: analysis.isLoggedIn,
-        isHumanRequired: analysis.isHumanRequired,
-        isConnection: analysis.isConnection,
-        blockType: analysis.blockType ?? "none",
-        reason: analysis.reason ?? "",
-      };
-    },
-  });
-
-  // Tool de alto nivel: enviar mensaje
-  tools.send_message = tool({
-    description:
-      "Envía un mensaje de LinkedIn a un perfil que ya es conexión. Falla si no es conexión.",
-    inputSchema: z.object({
-      profileUrl: z.string(),
-      message: z.string(),
-    }),
-    execute: async ({ profileUrl, message }) => {
-      const page = getPage();
-      const result = await sendMessageToProfile(page, profileUrl, message);
-
-      const { analysis, status, error } = result;
-
-      return {
-        status,
-        error,
-        isLoggedIn: analysis.isLoggedIn,
-        isHumanRequired: analysis.isHumanRequired,
-        isConnection: analysis.isConnection,
-        blockType: analysis.blockType ?? "none",
-        reason: analysis.reason ?? "",
-      };
-    },
-  });
-
   return tools;
 }
 
@@ -492,10 +680,10 @@ Tu objetivo es enviar un mensaje a una conexión de LinkedIn.
 Pautas:
 - Verifica primero que la sesión está logueada y que el perfil es conexión
   (tool check_profile_connection te ayuda con esto).
+- PRIORIDAD: intenta usar el tool de alto nivel send_message con profileUrl y message.
+- Solo si send_message falla de forma clara puedes apoyarte en navigate, click, fill, wait
+  y los tools de introspección (list_buttons y list_textboxes) o playwright_run_code.
 - Si hay bloqueos o no estás logueado, no sigas e informa el problema.
-- Para enviar el mensaje puedes usar el tool de alto nivel send_message,
-  y si falla, apoyarte en navigate, click, fill, wait y los tools de introspección
-  (list_buttons y list_textboxes) para encontrar el editor y el botón de enviar.
 
 Devuélveme un resumen breve en español indicando si el mensaje se envió o no y por qué.
 `;
@@ -508,31 +696,27 @@ Explica que la tarea no está soportada.
 `;
 }
 
-const SYSTEM_PROMPT = `
+  const SYSTEM_PROMPT = `
 Eres un agente autónomo que controla un navegador Chromium real mediante tools.
 Tu misión es automatizar acciones en LinkedIn (login, enviar invitaciones y mensajes)
 de forma segura y respetando los límites de la plataforma.
 
 Herramientas clave:
 - navigate, click, fill, wait: interacción genérica con la web.
-- list_buttons, list_textboxes: para inspeccionar la estructura y los controles de la página
-  antes de actuar, parecido a cómo un humano observaría los elementos disponibles.
+- list_buttons, list_textboxes: para inspeccionar la estructura y los controles de la página.
+- dom_snapshot: para ver el árbol de accesibilidad completo y encontrar elementos por rol y nombre.
+- playwright_run_code: para ejecutar código Playwright arbitrario sobre la página actual usando la API oficial (page.getByRole, page.locator, etc.).
 - login_with_credentials: cuando dispones de credenciales para iniciar sesión.
-- check_profile_connection, send_connection_request, send_message: operaciones de alto nivel
-  específicas de LinkedIn.
+- check_profile_connection: operación de alto nivel que te dice si la sesión está logueada, si el perfil es conexión y si hay bloqueos.
+- send_message: cuando ya sabes el perfil y el texto del mensaje, ÚSALO COMO PRIMERA OPCIÓN para enviar el mensaje.
+- send_connection_request: cuando quieres enviar una invitación de conexión a un perfil.
+- report_task_result: úsalo UNA vez al final para declarar el resultado estructurado (login_ok, invite_sent, message_sent, etc).
 
 Reglas importantes:
-- SOLO puedes interactuar con el navegador usando tools. No inventes APIs ni ejecutes
-  acciones que no se puedan lograr con los tools disponibles.
-- Antes de hacer clicks importantes, es buena práctica inspeccionar la página con
-  list_buttons o list_textboxes para entender qué controles hay.
-- Si detectas captchas, 2FA, rate limiting u otras verificaciones que requieran humanos,
-  detente y explica que se necesita intervención humana.
-- Evita repetir la misma acción muchas veces seguidas; si no funciona tras uno o dos
-  intentos razonables, asume que hay un problema estructural.
-- Evita esperas muy largas con 'wait'; prefiere apoyarte en el auto-waiting de los locators
-  y en checks semánticos (por ejemplo, que aparezca un botón o un textbox).
-- Siempre responde en español con un resumen claro y conciso al final.
+- Cuando tu objetivo sea enviar un mensaje a un perfil concreto y ya tienes profileUrl y message,
+  primero intenta usar el tool de alto nivel send_message.
+- Solo si send_message falla claramente puedes apoyarte en playwright_run_code, click, fill, etc.
+...
 `;
 
 /**
@@ -603,6 +787,12 @@ export async function runLinkedInAutonomousAgent(
   const checkConnectionCalls = toolCalls.filter(
     (c) => c.toolName === "check_profile_connection"
   );
+  const reportCalls = toolCalls.filter(
+    (c) => c.toolName === "report_task_result"
+  );
+  const lastReport = reportCalls.length
+    ? reportCalls[reportCalls.length - 1].result
+    : null;
 
   // Flags por status
   const anyMessageSent = sendMessageCalls.some(
@@ -625,27 +815,19 @@ export async function runLinkedInAutonomousAgent(
 
   // Heurística de éxito basada en tools
   let success = false;
-  if (task === "send_message") {
-    success = anyMessageSent;
-  } else if (task === "send_connection") {
-    success = anyInviteSent || anyAlreadyConnected;
-  } else if (task === "login") {
-    // para login, mantenemos algo de heurística textual + check_profile_connection
-    const lowerText = result.text.toLowerCase();
-    const textLooksOk =
-      !lowerText.includes("error") &&
-      !lowerText.includes("bloqueo") &&
-      !lowerText.includes("captcha") &&
-      !lowerText.includes("2fa") &&
-      !lowerText.includes("intervención humana");
 
-    const anyLoggedIn = checkConnectionCalls.some(
-      (c) => c.result?.isLoggedIn === true
-    );
-    success = textLooksOk && anyLoggedIn;
-  }
-
-  if (anyHardFailure) {
+  if (lastReport) {
+    const status = lastReport.status;
+    if (task === "send_message") {
+      success = status === "message_sent";
+    } else if (task === "send_connection") {
+      success = status === "invite_sent" || status === "already_connected";
+    } else if (task === "login") {
+      success = status === "login_ok";
+    }
+  } else {
+    // Fallback defensivo: si el modelo no llamó report_task_result,
+    // podés dejar success=false o mantener tu heurística textual antigua.
     success = false;
   }
 

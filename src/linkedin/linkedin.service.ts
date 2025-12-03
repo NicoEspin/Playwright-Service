@@ -265,7 +265,6 @@ export async function checkProfileConnection(
   };
 }
 
-
 /**
  * Envía una connection request con nota (si no es conexión).
  * También detecta si la sesión NO está logueada o si hace falta intervención humana.
@@ -394,11 +393,10 @@ export async function sendMessageToProfile(
   error?: string;
 }> {
   const steps: ActionStepTrace[] = options?.reuseTrace?.steps ?? [];
-  let trace: ActionTrace =
-    options?.reuseTrace ?? {
-      actionId: crypto.randomUUID(),
-      steps,
-    };
+  let trace: ActionTrace = options?.reuseTrace ?? {
+    actionId: crypto.randomUUID(),
+    steps,
+  };
 
   let analysis: ScreenshotAnalysis;
 
@@ -448,28 +446,24 @@ export async function sendMessageToProfile(
     );
     trace.steps.push(beforeClick);
 
-    // 2.1 Botón "Enviar mensaje" (solo user-facing, sin clases)
-    let msgButton = page.getByRole("button", {
-      name: /enviar mensaje|send message|mensaje/i,
-    });
+    // 2.1 Botón "Enviar mensaje" del perfil
+    let msgButton = page.locator(
+      [
+        "button[aria-label*='Enviar mensaje']",
+        "button[aria-label*='Send message']",
+        "button.artdeco-button:has(span.artdeco-button__text:has-text('Enviar mensaje'))",
+        "button.artdeco-button:has(span.artdeco-button__text:has-text('Message'))",
+      ].join(", ")
+    );
 
     if ((await msgButton.count()) === 0) {
-      // Fallback: aria-label parcial
-      msgButton = page.locator(
-        "button[aria-label*='Enviar mensaje'], button[aria-label*='Send message']"
-      );
+      msgButton = page.getByRole("button", {
+        name: /enviar mensaje|send message|mensaje/i,
+      });
     }
 
     const msgButtonCount = await msgButton.count();
     if (!msgButtonCount) {
-      const ariaButtons = await page.$$eval("button[aria-label]", (els) =>
-        els.map((el) => (el as HTMLElement).getAttribute("aria-label"))
-      );
-      console.log(
-        "[sendMessageToProfile] No se encontró botón 'Enviar mensaje'. aria-label buttons:",
-        ariaButtons
-      );
-
       return {
         trace,
         analysis,
@@ -479,79 +473,115 @@ export async function sendMessageToProfile(
       };
     }
 
-    const button = msgButton.first();
-    await button.scrollIntoViewIfNeeded();
-    await button.click();
+    await msgButton.first().scrollIntoViewIfNeeded();
+    await msgButton.first().click();
 
-    // 2.2 Editor de mensaje
-    // Primero probamos por role + accessible name (user-facing)
-    let editor = page.getByRole("textbox", {
-      name: /escribe un mensaje|write a message|type your message/i,
-    });
+    // 🔹 2.1.1 Esperar a que se monte el panel de mensajes
+    // (si no, count() sobre el editor siempre da 0)
+    const messagePanelSelector = [
+      "[id^='msg-form-ember']",
+      "div.msg-overlay-conversation-bubble",
+      "section.msg-overlay-conversation-bubble",
+    ].join(", ");
 
-    // Si no hay ninguno con ese nombre, buscamos cualquier textbox visible contenteditable
-    if ((await editor.count()) === 0) {
-      const editorSelector =
-        "div[role='textbox'][contenteditable='true'], textarea";
-
-      // Esperamos a que ALGÚN editor visible aparezca
-      const handle = await page.waitForSelector(editorSelector, {
-        state: "visible",
+    try {
+      await page.waitForSelector(messagePanelSelector, {
         timeout: 15_000,
       });
-
-      // Creamos un locator solo sobre ese handle concreto (ya sabemos que es visible)
-      const elementHandleLocator = page.locator(editorSelector).filter({
-        has: page.locator(`#${await handle.getAttribute("id")}`).or(
-          page.locator(
-            `[aria-label='${(await handle.getAttribute("aria-label")) ?? ""}']`
-          )
-        ),
-      });
-
-      editor =
-        (await elementHandleLocator.count()) > 0
-          ? elementHandleLocator
-          : page.locator(editorSelector).filter({ hasText: "" }).first();
+    } catch {
+      // si no encontramos el panel explícito, al menos damos un pequeño margen
+      await page.waitForTimeout(1500);
     }
 
-    const beforeType = await takeTraceScreenshot(
-      page,
-      "before_type_message"
+    // 2.2 Editor de mensaje (más tolerante)
+    let editor = page.locator(
+      "div.msg-form__contenteditable[contenteditable='true']"
     );
+
+    if ((await editor.count()) === 0) {
+      // Fallback usando el patrón que viste: msg-form-emberXXX
+      editor = page.locator(
+        "[id^='msg-form-ember'] div.msg-form__contenteditable"
+      );
+    }
+
+    if ((await editor.count()) === 0) {
+      // Fallback genérico: cualquier contenteditable tipo textbox
+      editor = page.locator("div[role='textbox'][contenteditable='true']");
+    }
+
+    if ((await editor.count()) === 0) {
+      // Fallback por rol + nombre accesible
+      editor = page.getByRole("textbox", {
+        name: /escribe un mensaje|write a message|type your message/i,
+      });
+    }
+
+    if ((await editor.count()) === 0) {
+      return {
+        trace,
+        analysis,
+        status: "failed",
+        error:
+          "No se encontró el área de texto para escribir el mensaje en la ventana de chat.",
+      };
+    }
+
+    const editorLocator = editor.first();
+
+    await editorLocator.waitFor({
+      state: "visible",
+      timeout: 15_000,
+    });
+
+    const beforeType = await takeTraceScreenshot(page, "before_type_message");
     trace.steps.push(beforeType);
 
-    await editor.click();
-    // Algunos contenteditable no soportan fill, pero probamos limpiar
+    await editorLocator.click();
+
     try {
-      await editor.fill("");
+      await editorLocator.fill("");
     } catch {
-      // ignore
+      // algunos contenteditable no soportan fill; ignoramos
     }
-    await editor.type(message, { delay: 15 });
+
+    await editorLocator.type(message, { delay: 15 });
 
     // 2.3 Botón "Enviar"
-    let sendButton = page.getByRole("button", {
-      name: /^enviar$|^send$/i,
+    let sendButton = page.locator(
+      "button.msg-form__send-button.artdeco-button.artdeco-button--1"
+    );
+
+    sendButton = sendButton.filter({
+      hasNot: page.locator("[disabled]"),
     });
 
     if ((await sendButton.count()) === 0) {
-      sendButton = page.locator(
-        "button[aria-label*='Enviar'], button[aria-label*='Send']"
-      );
+      // Fallback usando el formulario msg-form-emberXXX
+      sendButton = page
+        .locator(
+          "[id^='msg-form-ember'] footer .msg-form__right-actions button"
+        )
+        .filter({
+          hasNot: page.locator("[disabled]"),
+        });
     }
 
     if ((await sendButton.count()) === 0) {
-      // Último recurso: clases LinkedIn (fallback, no core)
-      sendButton = page.locator(
-        "button.msg-form__send-button, button.msg-form__send-toggle"
-      );
+      // Fallback: por rol + texto accesible genérico
+      sendButton = page
+        .getByRole("button", {
+          name: /^enviar$|^send$/i,
+        })
+        .filter({
+          hasNot: page.locator("[disabled]"),
+        });
     }
 
     if ((await sendButton.count()) > 0) {
       await sendButton.first().click();
     } else {
-      // Último recurso: Enter
+      // Último recurso: Enter en el editor
       await page.keyboard.press("Enter");
     }
 
