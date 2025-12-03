@@ -63,7 +63,7 @@ function createLinkedInTools(
       url: z
         .string()
         .describe(
-          "URL absoluta, por ejemplo 'https://www.linkedin.com/login' o un perfil."
+          "URL absoluta, por ejemplo 'https://www.linkedin.com/login' o la URL de un perfil."
         ),
     }),
     execute: async ({ url }) => {
@@ -79,17 +79,17 @@ function createLinkedInTools(
     },
   });
 
-  // Esperar unos milisegundos
+  // Esperar unos milisegundos (mejor para pequeñas pausas, no para todo)
   tools.wait = tool({
     description:
-      "Espera una cantidad de milisegundos. Úsalo después de navegar o de hacer clicks que cambian la UI.",
+      "Espera una cantidad de milisegundos. Úsalo como pausa corta tras navegaciones o cambios de UI, no abuses de esperas largas.",
     inputSchema: z.object({
       ms: z
         .number()
         .int()
         .min(0)
-        .max(60_000)
-        .describe("Tiempo en milisegundos (0 - 60000)."),
+        .max(30_000)
+        .describe("Tiempo en milisegundos (0 - 30000)."),
     }),
     execute: async ({ ms }) => {
       const page = getPage();
@@ -170,7 +170,95 @@ function createLinkedInTools(
     },
   });
 
-  // Tool especializado para login con credenciales
+  // --- TOOLS DE INTROSPECCIÓN (sin accessibility.snapshot) ---
+
+  // Listado de botones visibles
+  tools.list_buttons = tool({
+    description:
+      "Lista los botones visibles de la página actual con su texto, aria-label y clase. Úsalo para localizar el botón correcto antes de hacer click.",
+    inputSchema: z.object({
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(40)
+        .describe("Máximo de botones a devolver."),
+    }),
+    execute: async ({ limit }) => {
+      const page = getPage();
+      const locator = page.getByRole("button");
+      const handles = await locator.elementHandles();
+      const items: {
+        text: string;
+        ariaLabel: string | null;
+        className: string | null;
+      }[] = [];
+
+      for (const handle of handles.slice(0, limit)) {
+        const [text, ariaLabel, className] = await Promise.all([
+          handle.innerText().catch(() => ""),
+          handle.getAttribute("aria-label"),
+          handle.getAttribute("class"),
+        ]);
+
+        items.push({
+          text: text.trim(),
+          ariaLabel: ariaLabel ?? null,
+          className: className ?? null,
+        });
+      }
+
+      return { buttons: items };
+    },
+  });
+
+  // Listado de inputs / textareas / textboxes
+  tools.list_textboxes = tool({
+    description:
+      "Lista inputs, textareas y elementos tipo textbox donde se puede escribir. Úsalo para decidir dónde escribir antes de llamar a fill.",
+    inputSchema: z.object({
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(40)
+        .describe("Máximo de elementos a devolver."),
+    }),
+    execute: async ({ limit }) => {
+      const page = getPage();
+      const locator = page.locator("input, textarea, [role='textbox']");
+      const handles = await locator.elementHandles();
+      const items: {
+        tagName: string;
+        type: string | null;
+        ariaLabel: string | null;
+        placeholder: string | null;
+      }[] = [];
+
+      for (const handle of handles.slice(0, limit)) {
+        const [tag, typeAttr, ariaLabel, placeholder] = await Promise.all([
+          handle.evaluate((el) => (el as HTMLElement).tagName.toLowerCase()),
+          handle.getAttribute("type"),
+          handle.getAttribute("aria-label"),
+          handle.getAttribute("placeholder"),
+        ]);
+
+        items.push({
+          tagName: tag,
+          type: typeAttr,
+          ariaLabel,
+          placeholder,
+        });
+      }
+
+      return { textboxes: items };
+    },
+  });
+
+  // --- LOGIN CON CREDENCIALES ---
+
   if (credentials) {
     const { email, password } = credentials;
 
@@ -258,7 +346,7 @@ function createLinkedInTools(
         }
 
         // 4) Esperar un rato y devolver estado básico
-        await page.waitForTimeout(8000);
+        await page.waitForTimeout(8_000);
         const currentUrl = page.url();
 
         return {
@@ -284,7 +372,6 @@ function createLinkedInTools(
       const page = getPage();
       const { analysis } = await checkProfileConnection(page, profileUrl);
 
-      // ⚠️ No devolvemos trace ni screenshots al modelo
       return {
         isLoggedIn: analysis.isLoggedIn,
         isHumanRequired: analysis.isHumanRequired,
@@ -296,62 +383,59 @@ function createLinkedInTools(
   });
 
   // Tool de alto nivel: enviar request de conexión
-tools.send_connection_request = tool({
-  description:
-    "Envía una solicitud de conexión a un perfil de LinkedIn. Usa un mensaje opcional como nota.",
-  inputSchema: z.object({
-    profileUrl: z.string(),
-    note: z
-      .string()
-      .optional()
-      .describe("Nota opcional para la solicitud de conexión."),
-  }),
-  execute: async ({ profileUrl, note }) => {
-    const page = getPage();
-    const result = await sendConnectionRequest(page, profileUrl, note);
+  tools.send_connection_request = tool({
+    description:
+      "Envía una solicitud de conexión a un perfil de LinkedIn. Usa un mensaje opcional como nota.",
+    inputSchema: z.object({
+      profileUrl: z.string(),
+      note: z
+        .string()
+        .optional()
+        .describe("Nota opcional para la solicitud de conexión."),
+    }),
+    execute: async ({ profileUrl, note }) => {
+      const page = getPage();
+      const result = await sendConnectionRequest(page, profileUrl, note);
 
-    const { analysis, status, error } = result;
+      const { analysis, status, error } = result;
 
-    // ⚠️ NO devolvemos trace ni screenshots al modelo
-    return {
-      status,
-      error,
-      isLoggedIn: analysis.isLoggedIn,
-      isHumanRequired: analysis.isHumanRequired,
-      isConnection: analysis.isConnection,
-      blockType: analysis.blockType ?? "none",
-      reason: analysis.reason ?? "",
-    };
-  },
-});
-
+      return {
+        status,
+        error,
+        isLoggedIn: analysis.isLoggedIn,
+        isHumanRequired: analysis.isHumanRequired,
+        isConnection: analysis.isConnection,
+        blockType: analysis.blockType ?? "none",
+        reason: analysis.reason ?? "",
+      };
+    },
+  });
 
   // Tool de alto nivel: enviar mensaje
   tools.send_message = tool({
-  description:
-    "Envía un mensaje de LinkedIn a un perfil que ya es conexión. Falla si no es conexión.",
-  inputSchema: z.object({
-    profileUrl: z.string(),
-    message: z.string(),
-  }),
-  execute: async ({ profileUrl, message }) => {
-    const page = getPage();
-    const result = await sendMessageToProfile(page, profileUrl, message);
+    description:
+      "Envía un mensaje de LinkedIn a un perfil que ya es conexión. Falla si no es conexión.",
+    inputSchema: z.object({
+      profileUrl: z.string(),
+      message: z.string(),
+    }),
+    execute: async ({ profileUrl, message }) => {
+      const page = getPage();
+      const result = await sendMessageToProfile(page, profileUrl, message);
 
-    const { analysis, status, error } = result;
+      const { analysis, status, error } = result;
 
-    return {
-      status,
-      error,
-      isLoggedIn: analysis.isLoggedIn,
-      isHumanRequired: analysis.isHumanRequired,
-      isConnection: analysis.isConnection,
-      blockType: analysis.blockType ?? "none",
-      reason: analysis.reason ?? "",
-    };
-  },
-});
-
+      return {
+        status,
+        error,
+        isLoggedIn: analysis.isLoggedIn,
+        isHumanRequired: analysis.isHumanRequired,
+        isConnection: analysis.isConnection,
+        blockType: analysis.blockType ?? "none",
+        reason: analysis.reason ?? "",
+      };
+    },
+  });
 
   return tools;
 }
@@ -364,55 +448,56 @@ function buildUserPrompt(input: RunLinkedInAutonomousAgentInput): string {
 
   if (task === "login") {
     return `
-Tarea: iniciar sesión en LinkedIn para esta sesión de navegador.
+Tu objetivo es dejar la sesión actual de navegador logueada en LinkedIn.
 
-Instrucciones:
-- Usa el tool "login_with_credentials" UNA sola vez al inicio para hacer login con el email y password asociados a esta sesión.
-- Después de hacer login, si es posible, navega a 'https://www.linkedin.com/feed/' para confirmar que la sesión está logueada.
-- Si detectas pantallas de verificación humana (captcha, 2FA, bloqueos), no intentes resolverlas: explica claramente que se necesita intervención humana.
-- Termina tu respuesta con un resumen breve en español indicando si el login fue exitoso o no y por qué.
+Contexto:
+- Tienes acceso a un navegador real controlado por Playwright.
+- Hay credenciales asociadas a esta sesión (email y password).
+
+Pautas:
+- Puedes navegar, inspeccionar la página usando tools como list_buttons y list_textboxes,
+  y usar login_with_credentials o rellenar el formulario manualmente.
+- Asegúrate al final de estar en una página que represente un usuario logueado
+  (por ejemplo el feed de LinkedIn).
+
+Devuélveme un resumen breve en español explicando si el login quedó correcto o no y por qué.
 `;
   }
 
   if (task === "send_connection") {
     return `
-Tarea: enviar una solicitud de conexión en LinkedIn.
+Tu objetivo es enviar una solicitud de conexión en LinkedIn a este perfil:
 
-Perfil objetivo: ${profileUrl ?? "(no proporcionado)"}
+- Perfil objetivo: ${profileUrl ?? "(no proporcionado)"}
 
-Instrucciones:
-- Primero usa "check_profile_connection" con el profileUrl para entender si:
-  - estás logueado,
-  - ya eres conexión,
-  - hay captchas o bloqueos.
-- Si el análisis indica que no estás logueado o hay bloqueo humano, no sigas; explica la situación.
-- Si no eres conexión y no hay bloqueos, usa "send_connection_request" para enviar la solicitud. Puedes pasar una nota si lo consideras útil.
-- Si ya eres conexión, no envíes otra solicitud; simplemente informa que ya están conectados.
-- Usa "wait" cuando haga falta después de navegar o de hacer clics importantes.
-- Termina con un resumen breve en español indicando:
-  - si se envió la solicitud,
-  - si ya estaban conectados,
-  - o si hubo algún bloqueo o error.
+Pautas:
+- Asegúrate de que la sesión está logueada.
+- Puedes usar tools de alto nivel como check_profile_connection y send_connection_request.
+- Si detectas bloqueos (captcha, 2FA, rate limit) o que no estás logueado, detente y explícalo.
+- Puedes inspeccionar la UI con list_buttons y list_textboxes
+  si necesitas localizar botones o inputs.
+
+Devuélveme un resumen breve en español indicando si se envió la solicitud,
+si ya estaban conectados o si hubo algún problema.
 `;
   }
 
   if (task === "send_message") {
     return `
-Tarea: enviar un mensaje a una conexión de LinkedIn.
+Tu objetivo es enviar un mensaje a una conexión de LinkedIn.
 
-Perfil objetivo: ${profileUrl ?? "(no proporcionado)"}
-Mensaje a enviar (texto sugerido): ${message ?? "(no proporcionado)"}
+- Perfil objetivo: ${profileUrl ?? "(no proporcionado)"}
+- Mensaje a enviar (texto sugerido): ${message ?? "(no proporcionado)"}
 
-Instrucciones:
-- Primero usa "check_profile_connection" para ver si:
-  - estás logueado,
-  - el perfil es conexión,
-  - hay bloqueos o captchas.
-- Si no estás logueado o hay bloqueo humano, no sigas; explica la situación.
-- Si el perfil NO es conexión, no intentes forzar el mensaje: informa que no es posible porque no son conexión.
-- Si el perfil es conexión, usa "send_message" pasando el profileUrl y el mensaje que te proporcioné. Puedes adaptar ligeramente el mensaje si es necesario.
-- Usa "wait" cuando haga falta tras navegar o abrir diálogos.
-- Termina con un resumen breve en español indicando si el mensaje fue enviado o no y por qué.
+Pautas:
+- Verifica primero que la sesión está logueada y que el perfil es conexión
+  (tool check_profile_connection te ayuda con esto).
+- Si hay bloqueos o no estás logueado, no sigas e informa el problema.
+- Para enviar el mensaje puedes usar el tool de alto nivel send_message,
+  y si falla, apoyarte en navigate, click, fill, wait y los tools de introspección
+  (list_buttons y list_textboxes) para encontrar el editor y el botón de enviar.
+
+Devuélveme un resumen breve en español indicando si el mensaje se envió o no y por qué.
 `;
   }
 
@@ -425,15 +510,28 @@ Explica que la tarea no está soportada.
 
 const SYSTEM_PROMPT = `
 Eres un agente autónomo que controla un navegador Chromium real mediante tools.
-Tu misión es automatizar acciones en LinkedIn (login, enviar invitaciones y mensajes) de forma segura y respetando los límites de la plataforma.
+Tu misión es automatizar acciones en LinkedIn (login, enviar invitaciones y mensajes)
+de forma segura y respetando los límites de la plataforma.
+
+Herramientas clave:
+- navigate, click, fill, wait: interacción genérica con la web.
+- list_buttons, list_textboxes: para inspeccionar la estructura y los controles de la página
+  antes de actuar, parecido a cómo un humano observaría los elementos disponibles.
+- login_with_credentials: cuando dispones de credenciales para iniciar sesión.
+- check_profile_connection, send_connection_request, send_message: operaciones de alto nivel
+  específicas de LinkedIn.
 
 Reglas importantes:
-- SOLO puedes interactuar con el navegador usando tools. No inventes APIs ni ejecutes acciones que no se puedan lograr con los tools disponibles.
-- Usa tools de alto nivel (check_profile_connection, send_connection_request, send_message, login_with_credentials) siempre que sea posible.
-- Usa los tools genéricos (navigate, click, fill, wait) solo cuando lo consideres necesario para completar la tarea.
-- Si detectas captchas, 2FA, rate limiting u otras verificaciones que requieran humanos, detente y explica que se necesita intervención humana.
-- No intentes adivinar passwords ni modificar credenciales.
-- Evita repetir la misma acción muchas veces seguidas; si no funciona tras un par de intentos, asume que hay un problema.
+- SOLO puedes interactuar con el navegador usando tools. No inventes APIs ni ejecutes
+  acciones que no se puedan lograr con los tools disponibles.
+- Antes de hacer clicks importantes, es buena práctica inspeccionar la página con
+  list_buttons o list_textboxes para entender qué controles hay.
+- Si detectas captchas, 2FA, rate limiting u otras verificaciones que requieran humanos,
+  detente y explica que se necesita intervención humana.
+- Evita repetir la misma acción muchas veces seguidas; si no funciona tras uno o dos
+  intentos razonables, asume que hay un problema estructural.
+- Evita esperas muy largas con 'wait'; prefiere apoyarte en el auto-waiting de los locators
+  y en checks semánticos (por ejemplo, que aparezca un botón o un textbox).
 - Siempre responde en español con un resumen claro y conciso al final.
 `;
 
@@ -482,21 +580,74 @@ export async function runLinkedInAutonomousAgent(
     system: SYSTEM_PROMPT,
     prompt: userPrompt,
     tools,
-    // multi-step agentic loop: máximo 20 pasos (tool calls + respuestas)
     stopWhen: stepCountIs(10),
   });
 
-  // Heurística simple de éxito: no encontró error obvio en la descripción final
-  const lowerText = result.text.toLowerCase();
-  const success =
-    !lowerText.includes("error") &&
-    !lowerText.includes("bloqueo") &&
-    !lowerText.includes("captcha") &&
-    !lowerText.includes("2fa") &&
-    !lowerText.includes("intervención humana");
-
   const steps = result.steps ?? [];
-  const toolCalls = steps.flatMap((s: any) => s.toolCalls ?? []);
+  const toolCalls: { toolName: string; args: any; result?: any }[] =
+    steps.flatMap((s: any) =>
+      (s.toolCalls ?? []).map((tc: any) => ({
+        toolName: tc.toolName,
+        args: tc.args,
+        result: tc.result,
+      }))
+    );
+
+  // Buscamos explícitamente los resultados relevantes
+  const sendMessageCalls = toolCalls.filter(
+    (c) => c.toolName === "send_message"
+  );
+  const sendConnectionCalls = toolCalls.filter(
+    (c) => c.toolName === "send_connection_request"
+  );
+  const checkConnectionCalls = toolCalls.filter(
+    (c) => c.toolName === "check_profile_connection"
+  );
+
+  // Flags por status
+  const anyMessageSent = sendMessageCalls.some(
+    (c) => c.result?.status === "message_sent"
+  );
+  const anyInviteSent = sendConnectionCalls.some(
+    (c) => c.result?.status === "invite_sent"
+  );
+  const anyAlreadyConnected = [
+    ...sendConnectionCalls,
+    ...checkConnectionCalls,
+  ].some((c) => c.result?.isConnection === "connected");
+
+  const anyHardFailure = [...sendMessageCalls, ...sendConnectionCalls].some(
+    (c) =>
+      c.result?.status === "failed" ||
+      c.result?.status === "not_logged_in" ||
+      c.result?.status === "human_required"
+  );
+
+  // Heurística de éxito basada en tools
+  let success = false;
+  if (task === "send_message") {
+    success = anyMessageSent;
+  } else if (task === "send_connection") {
+    success = anyInviteSent || anyAlreadyConnected;
+  } else if (task === "login") {
+    // para login, mantenemos algo de heurística textual + check_profile_connection
+    const lowerText = result.text.toLowerCase();
+    const textLooksOk =
+      !lowerText.includes("error") &&
+      !lowerText.includes("bloqueo") &&
+      !lowerText.includes("captcha") &&
+      !lowerText.includes("2fa") &&
+      !lowerText.includes("intervención humana");
+
+    const anyLoggedIn = checkConnectionCalls.some(
+      (c) => c.result?.isLoggedIn === true
+    );
+    success = textLooksOk && anyLoggedIn;
+  }
+
+  if (anyHardFailure) {
+    success = false;
+  }
 
   return {
     success,

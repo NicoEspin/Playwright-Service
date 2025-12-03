@@ -198,7 +198,10 @@ export async function runLinkedinAgentTask(
 
     // En el resto de modos, intentamos mandar mensaje
     const message = await buildMessageText(profileUrl, messageTemplate);
-    const msgResult = await sendMessageToProfile(page, profileUrl, message);
+    const msgResult = await sendMessageToProfile(page, profileUrl, message, {
+      reuseAnalysis: analysis,
+      reuseTrace: checkTrace,
+    });
     traces.push(msgResult.trace);
 
     if (msgResult.status === "message_sent") {
@@ -267,9 +270,8 @@ export async function runLinkedinAgentTask(
     connResult.status === "already_connected"
   ) {
     return {
-      status: connResult.status === "invite_sent"
-        ? "invite_sent"
-        : "already_connected",
+      status:
+        connResult.status === "invite_sent" ? "invite_sent" : "already_connected",
       analysis: connResult.analysis,
       traces,
       finalConnectionNote: note,

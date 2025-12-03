@@ -227,25 +227,29 @@ export async function checkProfileConnection(
 
   try {
     await page.goto(profileUrl, {
-      waitUntil: "domcontentloaded", // 👈 en lugar de "networkidle"
-      timeout: 60_000, // 👈 más margen que los 30s por defecto
+      waitUntil: "domcontentloaded",
+      timeout: 60_000,
     });
   } catch (err) {
-    // Si es un timeout, logueamos y seguimos con lo que haya cargado
     if (err instanceof errors.TimeoutError) {
       console.warn(
         "[checkProfileConnection] Timeout navegando al perfil, sigo con la página parcial...",
         String(err)
       );
     } else {
-      // Otros errores sí se re-lanzan
       throw err;
     }
   }
 
-  // Seguimos igual: damos tiempo a que se asienten los elementos
-  await page.waitForTimeout(5000);
-  await page.waitForTimeout(10000);
+  // Intentamos estabilizar un poco más la carga sin dormir a ciegas
+  try {
+    await page.waitForLoadState("networkidle", { timeout: 10_000 });
+  } catch {
+    // si no llega a networkidle en 10s, seguimos con lo que haya
+  }
+
+  // Pequeña espera extra para animaciones / lazy loads
+  await page.waitForTimeout(2_000);
 
   const step = await takeTraceScreenshot(page, "profile_loaded");
   steps.push(step);
@@ -260,6 +264,7 @@ export async function checkProfileConnection(
     analysis,
   };
 }
+
 
 /**
  * Envía una connection request con nota (si no es conexión).
@@ -368,10 +373,15 @@ export async function sendConnectionRequest(
 /**
  * Envía un mensaje si ya es conexión.
  */
+// src/linkedin/linkedin.service.ts
 export async function sendMessageToProfile(
   page: Page,
   profileUrl: string,
-  message: string
+  message: string,
+  options?: {
+    reuseAnalysis?: ScreenshotAnalysis;
+    reuseTrace?: ActionTrace;
+  }
 ): Promise<{
   trace: ActionTrace;
   analysis: ScreenshotAnalysis;
@@ -383,26 +393,25 @@ export async function sendMessageToProfile(
     | "not_logged_in";
   error?: string;
 }> {
-  const actionId = crypto.randomUUID();
-  const steps: ActionStepTrace[] = [];
-  const trace: ActionTrace = { actionId, steps };
+  const steps: ActionStepTrace[] = options?.reuseTrace?.steps ?? [];
+  let trace: ActionTrace =
+    options?.reuseTrace ?? {
+      actionId: crypto.randomUUID(),
+      steps,
+    };
 
-  // 1) Ir al perfil
-  await page.goto(profileUrl, {
-    waitUntil: "domcontentloaded",
-    timeout: 60_000,
-  });
-  await page.waitForTimeout(5000);
+  let analysis: ScreenshotAnalysis;
 
-  const step = await takeTraceScreenshot(page, "profile_loaded_for_message");
-  steps.push(step);
+  if (options?.reuseAnalysis) {
+    analysis = options.reuseAnalysis;
+  } else {
+    const { trace: baseTrace, analysis: newAnalysis } =
+      await checkProfileConnection(page, profileUrl);
+    analysis = newAnalysis;
+    trace.steps.push(...baseTrace.steps);
+  }
 
-  const analysis = await analyzeScreenshotWithOpenAIFromStep(
-    step,
-    "profile_state"
-  );
-
-  // 2) Chequeos previos
+  // 1) Chequeos previos
   if (!analysis.isLoggedIn) {
     return {
       trace,
@@ -431,31 +440,28 @@ export async function sendMessageToProfile(
     };
   }
 
+  // 2) Flujo de mensaje
   try {
-    // 3) Click en el botón azul "Enviar mensaje a ..." / "Send message to ..."
     const beforeClick = await takeTraceScreenshot(
       page,
-      "before_click_send_message_button"
+      "before_open_message_popup"
     );
-    steps.push(beforeClick);
+    trace.steps.push(beforeClick);
 
-    // 🎯 Primer intento: botón específico "Enviar mensaje a ..." (usa aria-label)
+    // 2.1 Botón "Enviar mensaje" (solo user-facing, sin clases)
     let msgButton = page.getByRole("button", {
-      name: /enviar mensaje a|send message to/i,
+      name: /enviar mensaje|send message|mensaje/i,
     });
 
-    let count = await msgButton.count();
-
-    // Fallback: genérico "Enviar mensaje" / "Send message" / "Mensaje"
-    if (!count) {
-      msgButton = page.getByRole("button", {
-        name: /enviar mensaje|send message|mensaje/i,
-      });
-      count = await msgButton.count();
+    if ((await msgButton.count()) === 0) {
+      // Fallback: aria-label parcial
+      msgButton = page.locator(
+        "button[aria-label*='Enviar mensaje'], button[aria-label*='Send message']"
+      );
     }
 
-    if (!count) {
-      // Debug: log de todos los aria-label de botones para que lo veas en consola
+    const msgButtonCount = await msgButton.count();
+    if (!msgButtonCount) {
       const ariaButtons = await page.$$eval("button[aria-label]", (els) =>
         els.map((el) => (el as HTMLElement).getAttribute("aria-label"))
       );
@@ -469,60 +475,121 @@ export async function sendMessageToProfile(
         analysis,
         status: "failed",
         error:
-          "No se encontró el botón 'Enviar mensaje' en el perfil de LinkedIn.",
+          "No se encontró ningún botón para abrir el cuadro de mensaje en el perfil de LinkedIn.",
       };
     }
 
     const button = msgButton.first();
     await button.scrollIntoViewIfNeeded();
-    await button.waitFor({ state: "visible", timeout: 15_000 });
     await button.click();
 
-    // 4) Esperar a que se abra el popup de mensajes
-    await page.waitForTimeout(2000);
-
-    // Selector robusto para el editor del mensaje
-    const editorSelector = [
-      "div.msg-form__contenteditable", // típico de LinkedIn
-      "div[role='textbox'][contenteditable='true']",
-      "div[contenteditable='true']",
-      "textarea",
-    ].join(", ");
-
-    await page.waitForSelector(editorSelector, {
-      timeout: 15_000,
+    // 2.2 Editor de mensaje
+    // Primero probamos por role + accessible name (user-facing)
+    let editor = page.getByRole("textbox", {
+      name: /escribe un mensaje|write a message|type your message/i,
     });
 
-    const editor = page.locator(editorSelector).first();
+    // Si no hay ninguno con ese nombre, buscamos cualquier textbox visible contenteditable
+    if ((await editor.count()) === 0) {
+      const editorSelector =
+        "div[role='textbox'][contenteditable='true'], textarea";
 
-    const beforeType = await takeTraceScreenshot(page, "before_type_message");
-    steps.push(beforeType);
+      // Esperamos a que ALGÚN editor visible aparezca
+      const handle = await page.waitForSelector(editorSelector, {
+        state: "visible",
+        timeout: 15_000,
+      });
 
-    // 5) Escribir el mensaje
+      // Creamos un locator solo sobre ese handle concreto (ya sabemos que es visible)
+      const elementHandleLocator = page.locator(editorSelector).filter({
+        has: page.locator(`#${await handle.getAttribute("id")}`).or(
+          page.locator(
+            `[aria-label='${(await handle.getAttribute("aria-label")) ?? ""}']`
+          )
+        ),
+      });
+
+      editor =
+        (await elementHandleLocator.count()) > 0
+          ? elementHandleLocator
+          : page.locator(editorSelector).filter({ hasText: "" }).first();
+    }
+
+    const beforeType = await takeTraceScreenshot(
+      page,
+      "before_type_message"
+    );
+    trace.steps.push(beforeType);
+
     await editor.click();
+    // Algunos contenteditable no soportan fill, pero probamos limpiar
     try {
       await editor.fill("");
     } catch {
-      // Si no soporta fill (algunos contenteditable), ignoramos
+      // ignore
     }
-    await editor.type(message, { delay: 20 });
+    await editor.type(message, { delay: 15 });
 
-    // 6) Click en el botón "Enviar" / "Send" dentro del popup
-    const sendButton = page
-      .getByRole("button", { name: /enviar|send/i })
-      .first();
+    // 2.3 Botón "Enviar"
+    let sendButton = page.getByRole("button", {
+      name: /^enviar$|^send$/i,
+    });
+
+    if ((await sendButton.count()) === 0) {
+      sendButton = page.locator(
+        "button[aria-label*='Enviar'], button[aria-label*='Send']"
+      );
+    }
+
+    if ((await sendButton.count()) === 0) {
+      // Último recurso: clases LinkedIn (fallback, no core)
+      sendButton = page.locator(
+        "button.msg-form__send-button, button.msg-form__send-toggle"
+      );
+    }
 
     if ((await sendButton.count()) > 0) {
-      await sendButton.click();
+      await sendButton.first().click();
     } else {
-      // Fallback: Enter para enviar
+      // Último recurso: Enter
       await page.keyboard.press("Enter");
     }
 
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(3_000);
 
     const afterSend = await takeTraceScreenshot(page, "after_send_message");
-    steps.push(afterSend);
+    trace.steps.push(afterSend);
+
+    // 2.4 Verificación en el hilo
+    const eventsLocator = page.locator(
+      [
+        ".msg-s-message-list__event",
+        ".msg-s-message-list__event-listitem",
+        "li.msg-s-message-list__event",
+      ].join(", ")
+    );
+
+    let lastText = "";
+    try {
+      if ((await eventsLocator.count()) > 0) {
+        lastText = (await eventsLocator.last().innerText()).trim();
+      }
+    } catch {
+      // ignoramos errores de lectura
+    }
+
+    const normalizedExpected = message.slice(0, 30).toLowerCase();
+    const normalizedActual = lastText.slice(-200).toLowerCase();
+
+    if (!normalizedActual || !normalizedActual.includes(normalizedExpected)) {
+      return {
+        trace,
+        analysis,
+        status: "failed",
+        error:
+          "No pude verificar que el mensaje aparezca en el hilo de conversación tras hacer click en 'Enviar'.",
+      };
+    }
 
     return {
       trace,
@@ -534,7 +601,7 @@ export async function sendMessageToProfile(
       page,
       "error_during_send_message"
     );
-    steps.push(errorStep);
+    trace.steps.push(errorStep);
 
     console.error("[sendMessageToProfile] Error durante envío:", err);
 
