@@ -130,8 +130,7 @@ Definiciones:
 Contexto/purpose: ${purpose}. Devuelve SOLO el JSON, sin texto adicional.`;
 
   const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0,
+    model: "gpt-5-nano",
     messages: [
       { role: "system", content: systemPrompt },
       {
@@ -386,7 +385,9 @@ export async function sendMessageToProfile(
 }> {
   const actionId = crypto.randomUUID();
   const steps: ActionStepTrace[] = [];
+  const trace: ActionTrace = { actionId, steps };
 
+  // 1) Ir al perfil
   await page.goto(profileUrl, {
     waitUntil: "domcontentloaded",
     timeout: 60_000,
@@ -401,9 +402,10 @@ export async function sendMessageToProfile(
     "profile_state"
   );
 
+  // 2) Chequeos previos
   if (!analysis.isLoggedIn) {
     return {
-      trace: { actionId, steps },
+      trace,
       analysis,
       status: "not_logged_in",
       error:
@@ -413,7 +415,7 @@ export async function sendMessageToProfile(
 
   if (analysis.isHumanRequired) {
     return {
-      trace: { actionId, steps },
+      trace,
       analysis,
       status: "human_required",
       error: "OpenAI marcó que es necesaria intervención humana.",
@@ -422,7 +424,7 @@ export async function sendMessageToProfile(
 
   if (analysis.isConnection !== "connected") {
     return {
-      trace: { actionId, steps },
+      trace,
       analysis,
       status: "not_connected",
       error: "El perfil no es conexión, no se puede enviar mensaje.",
@@ -430,31 +432,100 @@ export async function sendMessageToProfile(
   }
 
   try {
-    // Click en "Mensaje / Message"
-    const msgButton = page
-      .getByRole("button", { name: /mensaj|message/i })
-      .first();
-    await msgButton.click();
+    // 3) Click en el botón azul "Enviar mensaje a ..." / "Send message to ..."
+    const beforeClick = await takeTraceScreenshot(
+      page,
+      "before_click_send_message_button"
+    );
+    steps.push(beforeClick);
 
-    // Buscar textarea / editor (contenteditable o textarea)
-    const editor = page
-      .locator("div[contenteditable='true'], textarea")
-      .first();
+    // 🎯 Primer intento: botón específico "Enviar mensaje a ..." (usa aria-label)
+    let msgButton = page.getByRole("button", {
+      name: /enviar mensaje a|send message to/i,
+    });
 
+    let count = await msgButton.count();
+
+    // Fallback: genérico "Enviar mensaje" / "Send message" / "Mensaje"
+    if (!count) {
+      msgButton = page.getByRole("button", {
+        name: /enviar mensaje|send message|mensaje/i,
+      });
+      count = await msgButton.count();
+    }
+
+    if (!count) {
+      // Debug: log de todos los aria-label de botones para que lo veas en consola
+      const ariaButtons = await page.$$eval("button[aria-label]", (els) =>
+        els.map((el) => (el as HTMLElement).getAttribute("aria-label"))
+      );
+      console.log(
+        "[sendMessageToProfile] No se encontró botón 'Enviar mensaje'. aria-label buttons:",
+        ariaButtons
+      );
+
+      return {
+        trace,
+        analysis,
+        status: "failed",
+        error:
+          "No se encontró el botón 'Enviar mensaje' en el perfil de LinkedIn.",
+      };
+    }
+
+    const button = msgButton.first();
+    await button.scrollIntoViewIfNeeded();
+    await button.waitFor({ state: "visible", timeout: 15_000 });
+    await button.click();
+
+    // 4) Esperar a que se abra el popup de mensajes
+    await page.waitForTimeout(2000);
+
+    // Selector robusto para el editor del mensaje
+    const editorSelector = [
+      "div.msg-form__contenteditable", // típico de LinkedIn
+      "div[role='textbox'][contenteditable='true']",
+      "div[contenteditable='true']",
+      "textarea",
+    ].join(", ");
+
+    await page.waitForSelector(editorSelector, {
+      timeout: 15_000,
+    });
+
+    const editor = page.locator(editorSelector).first();
+
+    const beforeType = await takeTraceScreenshot(page, "before_type_message");
+    steps.push(beforeType);
+
+    // 5) Escribir el mensaje
     await editor.click();
-    await editor.fill(""); // limpiar si aplica
-    await editor.type(message);
+    try {
+      await editor.fill("");
+    } catch {
+      // Si no soporta fill (algunos contenteditable), ignoramos
+    }
+    await editor.type(message, { delay: 20 });
 
+    // 6) Click en el botón "Enviar" / "Send" dentro del popup
     const sendButton = page
       .getByRole("button", { name: /enviar|send/i })
       .first();
-    await sendButton.click();
+
+    if ((await sendButton.count()) > 0) {
+      await sendButton.click();
+    } else {
+      // Fallback: Enter para enviar
+      await page.keyboard.press("Enter");
+    }
+
+    await page.waitForTimeout(3000);
 
     const afterSend = await takeTraceScreenshot(page, "after_send_message");
     steps.push(afterSend);
 
     return {
-      trace: { actionId, steps },
+      trace,
       analysis,
       status: "message_sent",
     };
@@ -465,8 +536,10 @@ export async function sendMessageToProfile(
     );
     steps.push(errorStep);
 
+    console.error("[sendMessageToProfile] Error durante envío:", err);
+
     return {
-      trace: { actionId, steps },
+      trace,
       analysis,
       status: "failed",
       error: String(err),

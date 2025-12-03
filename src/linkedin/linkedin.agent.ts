@@ -82,8 +82,7 @@ async function buildConnectionNote(
   if (trimmed) return trimmed;
 
   const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0.5,
+    model: "gpt-5-nano",
     messages: [
       {
         role: "system",
@@ -114,8 +113,7 @@ async function buildMessageText(
   if (trimmed) return trimmed;
 
   const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0.6,
+    model: "gpt-5-nano",
     messages: [
       {
         role: "system",
