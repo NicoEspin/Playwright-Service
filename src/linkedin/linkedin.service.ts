@@ -447,14 +447,25 @@ export async function sendMessageToProfile(
     trace.steps.push(beforeClick);
 
     // 2.1 Botón "Enviar mensaje" del perfil
+    // 🔹 PRIMER INTENTO: botón nuevo con el icono `send-privately-medium` + texto "Enviar mensaje"
     let msgButton = page.locator(
       [
-        "button[aria-label*='Enviar mensaje']",
-        "button[aria-label*='Send message']",
-        "button.artdeco-button:has(span.artdeco-button__text:has-text('Enviar mensaje'))",
-        "button.artdeco-button:has(span.artdeco-button__text:has-text('Message'))",
+        "button:has(svg#send-privately-medium):has-text('Enviar mensaje')",
+        "button:has(svg#send-privately-medium):has-text('Send message')",
       ].join(", ")
     );
+
+    // Si no encontramos el botón nuevo, usamos los selectores anteriores como fallback
+    if ((await msgButton.count()) === 0) {
+      msgButton = page.locator(
+        [
+          "button[aria-label*='Enviar mensaje']",
+          "button[aria-label*='Send message']",
+          "button.artdeco-button:has(span.artdeco-button__text:has-text('Enviar mensaje'))",
+          "button.artdeco-button:has(span.artdeco-button__text:has-text('Message'))",
+        ].join(", ")
+      );
+    }
 
     if ((await msgButton.count()) === 0) {
       msgButton = page.getByRole("button", {
@@ -473,48 +484,63 @@ export async function sendMessageToProfile(
       };
     }
 
-    await msgButton.first().scrollIntoViewIfNeeded();
-    await msgButton.first().click();
+    const msgButtonLocator = msgButton.first();
+    await msgButtonLocator.scrollIntoViewIfNeeded();
+    await msgButtonLocator.click();
 
-    // 🔹 2.1.1 Esperar a que se monte el panel de mensajes
-    // (si no, count() sobre el editor siempre da 0)
-    const messagePanelSelector = [
+    // 🔹 Espera explícita a que se abra el drawer / panel de mensajes
+    // (la animación puede demorar un poco)
+    const drawerOrEditorSelectors = [
+      // panel clásico de mensajes
       "[id^='msg-form-ember']",
       "div.msg-overlay-conversation-bubble",
       "section.msg-overlay-conversation-bubble",
+      // editor clásico dentro del drawer
+      "div.msg-form__contenteditable[contenteditable='true']",
+      // editor genérico tipo textbox
+      "div[role='textbox'][contenteditable='true']",
     ].join(", ");
 
     try {
-      await page.waitForSelector(messagePanelSelector, {
-        timeout: 15_000,
+      await page.waitForSelector(drawerOrEditorSelectors, {
+        state: "visible",
+        timeout: 20_000,
       });
     } catch {
-      // si no encontramos el panel explícito, al menos damos un pequeño margen
-      await page.waitForTimeout(1500);
+      // Si no vemos el drawer explícito, damos un pequeño margen extra
+      await page.waitForTimeout(2000);
     }
 
-    // 2.2 Editor de mensaje (más tolerante)
+    // 2.2 Editor de mensaje (más tolerante, sin hacer count demasiado pronto)
     let editor = page.locator(
-      "div.msg-form__contenteditable[contenteditable='true']"
+      [
+        "div.msg-form__contenteditable[contenteditable='true']",
+        "[id^='msg-form-ember'] div.msg-form__contenteditable[contenteditable='true']",
+        "section.msg-overlay-conversation-bubble div.msg-form__contenteditable[contenteditable='true']",
+        "div[role='textbox'][contenteditable='true']",
+      ].join(", ")
     );
 
-    if ((await editor.count()) === 0) {
-      // Fallback usando el patrón que viste: msg-form-emberXXX
-      editor = page.locator(
-        "[id^='msg-form-ember'] div.msg-form__contenteditable"
-      );
-    }
-
-    if ((await editor.count()) === 0) {
-      // Fallback genérico: cualquier contenteditable tipo textbox
-      editor = page.locator("div[role='textbox'][contenteditable='true']");
-    }
-
-    if ((await editor.count()) === 0) {
-      // Fallback por rol + nombre accesible
-      editor = page.getByRole("textbox", {
-        name: /escribe un mensaje|write a message|type your message/i,
+    try {
+      // Esperamos a que ALGUNO de esos editores aparezca visible (drawer terminado de abrir)
+      await editor.first().waitFor({
+        state: "visible",
+        timeout: 20_000,
       });
+    } catch {
+      // Fallback adicional: textbox por rol + nombre accesible
+      editor = page.getByRole("textbox", {
+        name: /escribe un mensaje|write a message|type your message|mensaje/i,
+      });
+
+      try {
+        await editor.first().waitFor({
+          state: "visible",
+          timeout: 10_000,
+        });
+      } catch {
+        // si tampoco aparece, seguimos y fallamos más abajo
+      }
     }
 
     if ((await editor.count()) === 0) {
@@ -523,16 +549,11 @@ export async function sendMessageToProfile(
         analysis,
         status: "failed",
         error:
-          "No se encontró el área de texto para escribir el mensaje en la ventana de chat.",
+          "No se encontró el área de texto para escribir el mensaje en la ventana de chat (drawer no disponible).",
       };
     }
 
     const editorLocator = editor.first();
-
-    await editorLocator.waitFor({
-      state: "visible",
-      timeout: 15_000,
-    });
 
     const beforeType = await takeTraceScreenshot(page, "before_type_message");
     trace.steps.push(beforeType);
@@ -540,9 +561,10 @@ export async function sendMessageToProfile(
     await editorLocator.click();
 
     try {
+      // algunos contenteditable no soportan fill; si falla no pasa nada
       await editorLocator.fill("");
     } catch {
-      // algunos contenteditable no soportan fill; ignoramos
+      // ignore
     }
 
     await editorLocator.type(message, { delay: 15 });
@@ -585,6 +607,7 @@ export async function sendMessageToProfile(
       await page.keyboard.press("Enter");
     }
 
+    // pequeña espera para que el mensaje aparezca en el hilo
     await page.waitForTimeout(3_000);
 
     const afterSend = await takeTraceScreenshot(page, "after_send_message");
